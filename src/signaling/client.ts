@@ -1,6 +1,8 @@
+import type { EncryptionProfileId } from "../crypto/session";
+
 export type ClientSignal =
-  | { type: "create_room" }
-  | { type: "join_room"; code: string }
+  | { type: "create_room"; encryptionProfile: EncryptionProfileId }
+  | { type: "join_room"; code: string; encryptionProfile: EncryptionProfileId }
   | { type: "offer"; payload: RTCSessionDescriptionInit }
   | { type: "answer"; payload: RTCSessionDescriptionInit }
   | { type: "ice_candidate"; payload: RTCIceCandidateInit }

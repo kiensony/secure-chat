@@ -20,6 +20,7 @@ Use it for testing and controlled environments first. Before production use, rev
 - Peer fingerprint verification before chat is enabled.
 - WebRTC peer-to-peer connection.
 - End-to-end encrypted DataChannel payloads.
+- Selectable Standard or High Assurance session encryption profile.
 - Short-lived 10-digit room codes for normal pairing.
 - Manual offer/answer exchange for users who do not want app-server signaling.
 - Encrypted file offer, accept, reject, cancel, transfer, and download flow.
@@ -112,13 +113,20 @@ The backup passphrase is not stored by the app.
 
 ### Session Encryption
 
+Users choose one session encryption profile before pairing:
+
+- Standard: ECDH P-384, HKDF-SHA-384, AES-GCM-256, one encryption layer.
+- High Assurance: ECDH P-521, HKDF-SHA-512, AES-GCM-256, seven independently derived encryption layers.
+
+High Assurance is an app-specific profile. It does not make a FIPS validation or formal military-standard compliance claim.
+
 For each chat session:
 
-1. Each side creates a fresh ECDH P-384 keypair.
-2. Each side signs its session hello with its long-term RSA-PSS identity.
+1. Each side creates a fresh ECDH keypair for the selected profile.
+2. Each side signs its session hello, including the selected encryption profile, with its long-term RSA-PSS identity.
 3. The peer validates the signature and verifies the public key fingerprint.
-4. The session derives directional AES-GCM-256 keys with HKDF-SHA-384.
-5. Encrypted frames include sequence numbers and authenticated metadata.
+4. The session derives directional AES-GCM-256 keys with the selected HKDF hash.
+5. Encrypted frames include sequence numbers, the selected profile, layer count, and authenticated metadata.
 
 Replay or out-of-order encrypted frames are rejected.
 

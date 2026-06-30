@@ -12,12 +12,15 @@ test("pairs two clients, verifies fingerprints, chats, and transfers files", asy
   try {
     await Promise.all([host.goto("/"), joiner.goto("/")]);
     await Promise.all([createIdentity(host), createIdentity(joiner)]);
+    await host.getByTestId("encryption-high-assurance").click();
+    await joiner.getByTestId("encryption-high-assurance").click();
 
     const backupDownload = host.waitForEvent("download");
     await host.getByTestId("download-backup").click();
     expect((await backupDownload).suggestedFilename()).toBe("securechat-key.json");
 
     await host.getByTestId("create-room").click();
+    await expect(host.getByTestId("encryption-high-assurance")).toBeDisabled();
     const code = (await host.getByTestId("room-code").textContent())?.replace(/\D/g, "");
     expect(code).toMatch(/^\d{10}$/);
 
@@ -101,13 +104,13 @@ test("pairs two clients with manual offer and answer without short-code signalin
     await expect(host.getByTestId("manual-offer-output")).toHaveValue(/^\{/);
     await expect(host.getByTestId("accept-manual-answer")).toBeDisabled();
     const offer = await host.getByTestId("manual-offer-output").inputValue();
-    expect(JSON.parse(offer)).toMatchObject({ version: 1, type: "offer" });
+    expect(JSON.parse(offer)).toMatchObject({ version: 2, type: "offer", encryptionProfile: "standard" });
 
     await joiner.getByTestId("manual-input").fill(offer);
     await joiner.getByTestId("accept-manual-offer").click();
     await expect(joiner.getByTestId("accept-manual-answer")).toHaveCount(0);
     const answer = await joiner.getByTestId("manual-answer-output").inputValue();
-    expect(JSON.parse(answer)).toMatchObject({ version: 1, type: "answer" });
+    expect(JSON.parse(answer)).toMatchObject({ version: 2, type: "answer", encryptionProfile: "standard" });
 
     await host.getByTestId("manual-input").fill(answer);
     await host.getByTestId("accept-manual-answer").click();

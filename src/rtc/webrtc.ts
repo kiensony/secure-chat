@@ -1,7 +1,7 @@
 import type { ClientSignal } from "../signaling/client";
 import { SecureChannel } from "./secureChannel";
 import type { Identity } from "../crypto/identity";
-import type { PeerRole, PlainFrame } from "../crypto/session";
+import type { EncryptionProfileId, PeerRole, PlainFrame } from "../crypto/session";
 
 const ICE_GATHERING_TIMEOUT_MS = 5000;
 
@@ -19,8 +19,9 @@ export interface IceServerConfig {
 }
 
 export interface ManualSessionPackage {
-  version: 1;
+  version: 2;
   type: "offer" | "answer";
+  encryptionProfile: EncryptionProfileId;
   description: RTCSessionDescriptionInit;
   iceCandidates: RTCIceCandidateInit[];
 }
@@ -36,6 +37,7 @@ export class SecurePeerConnection {
   constructor(
     private readonly role: PeerRole,
     private readonly identity: Identity,
+    private readonly encryptionProfile: EncryptionProfileId,
     private readonly relaySignal: ((signal: ClientSignal) => void) | null,
     private readonly events: PeerConnectionEvents,
     iceServers: IceServerConfig[]
@@ -79,8 +81,9 @@ export class SecurePeerConnection {
       throw new Error("Unable to create local offer");
     }
     return {
-      version: 1,
+      version: 2,
       type: "offer",
+      encryptionProfile: this.encryptionProfile,
       description,
       iceCandidates: [...this.iceCandidates]
     };
@@ -94,7 +97,11 @@ export class SecurePeerConnection {
   }
 
   async acceptManualOffer(offerPackage: ManualSessionPackage): Promise<ManualSessionPackage> {
-    if (offerPackage.version !== 1 || offerPackage.type !== "offer") {
+    if (
+      offerPackage.version !== 2 ||
+      offerPackage.type !== "offer" ||
+      offerPackage.encryptionProfile !== this.encryptionProfile
+    ) {
       throw new Error("Paste a valid Secure Chat offer package");
     }
 
@@ -112,8 +119,9 @@ export class SecurePeerConnection {
     }
 
     return {
-      version: 1,
+      version: 2,
       type: "answer",
+      encryptionProfile: this.encryptionProfile,
       description,
       iceCandidates: [...this.iceCandidates]
     };
@@ -124,7 +132,11 @@ export class SecurePeerConnection {
   }
 
   async acceptManualAnswer(answerPackage: ManualSessionPackage): Promise<void> {
-    if (answerPackage.version !== 1 || answerPackage.type !== "answer") {
+    if (
+      answerPackage.version !== 2 ||
+      answerPackage.type !== "answer" ||
+      answerPackage.encryptionProfile !== this.encryptionProfile
+    ) {
       throw new Error("Paste a valid Secure Chat answer package");
     }
 
@@ -156,7 +168,7 @@ export class SecurePeerConnection {
     channel.addEventListener("open", () => this.events.onStatus("DataChannel open"));
     channel.addEventListener("close", () => this.events.onStatus("DataChannel closed"));
     channel.addEventListener("error", () => this.events.onError(new Error("DataChannel error")));
-    this.secureChannel = new SecureChannel(channel, this.identity, this.role, {
+    this.secureChannel = new SecureChannel(channel, this.identity, this.role, this.encryptionProfile, {
       onReady: (peerFingerprint) => this.events.onSecureReady(peerFingerprint),
       onFrame: (frame) => this.events.onFrame(frame),
       onError: (error) => this.events.onError(error)

@@ -18,11 +18,47 @@ import {
 } from "./identity";
 
 export type PeerRole = "host" | "joiner";
+export type EncryptionProfileId = "standard" | "high_assurance";
+
+export interface EncryptionProfile {
+  id: EncryptionProfileId;
+  label: string;
+  ecdhCurve: "P-384" | "P-521";
+  ecdhBits: 384 | 521;
+  hash: "SHA-384" | "SHA-512";
+  layerCount: 1 | 7;
+}
+
+export const DEFAULT_ENCRYPTION_PROFILE: EncryptionProfileId = "standard";
+
+export const ENCRYPTION_PROFILES: Record<EncryptionProfileId, EncryptionProfile> = {
+  standard: {
+    id: "standard",
+    label: "Standard",
+    ecdhCurve: "P-384",
+    ecdhBits: 384,
+    hash: "SHA-384",
+    layerCount: 1
+  },
+  high_assurance: {
+    id: "high_assurance",
+    label: "High Assurance (7-layer)",
+    ecdhCurve: "P-521",
+    ecdhBits: 521,
+    hash: "SHA-512",
+    layerCount: 7
+  }
+};
+
+const SESSION_PROTOCOL = "secure-chat-v2";
+const ENVELOPE_VERSION = 2;
 
 export interface SessionHello {
   type: "session_hello";
-  protocol: "secure-chat-v1";
+  protocol: "secure-chat-v2";
   role: PeerRole;
+  encryptionProfile: EncryptionProfileId;
+  layerCount: number;
   identityPublicJwk: JsonWebKey;
   identityFingerprint: string;
   ecdhPublicKey: string;
@@ -32,10 +68,12 @@ export interface SessionHello {
 
 export interface EncryptedEnvelope {
   type: "encrypted";
-  version: 1;
+  version: 2;
   seq: number;
-  nonce: string;
+  nonces: string[];
   senderFingerprint: string;
+  encryptionProfile: EncryptionProfileId;
+  layerCount: number;
   aad: string;
   ciphertext: string;
 }
@@ -48,6 +86,8 @@ export interface PlainFrame {
 export interface SecureSession {
   peerFingerprint: string;
   peerPublicJwk: JsonWebKey;
+  encryptionProfile: EncryptionProfileId;
+  layerCount: number;
   encrypt(frame: PlainFrame): Promise<EncryptedEnvelope>;
   decrypt(envelope: EncryptedEnvelope): Promise<PlainFrame>;
 }
@@ -63,11 +103,28 @@ interface HandshakeState {
 export async function createLocalHello(identity: Identity, role: PeerRole): Promise<{
   hello: SessionHello;
   ecdh: CryptoKeyPair;
+}>;
+export async function createLocalHello(
+  identity: Identity,
+  role: PeerRole,
+  encryptionProfile: EncryptionProfileId
+): Promise<{
+  hello: SessionHello;
+  ecdh: CryptoKeyPair;
+}>;
+export async function createLocalHello(
+  identity: Identity,
+  role: PeerRole,
+  encryptionProfile: EncryptionProfileId = DEFAULT_ENCRYPTION_PROFILE
+): Promise<{
+  hello: SessionHello;
+  ecdh: CryptoKeyPair;
 }> {
+  const profile = encryptionProfileConfig(encryptionProfile);
   const ecdh = await crypto.subtle.generateKey(
     {
       name: "ECDH",
-      namedCurve: "P-384"
+      namedCurve: profile.ecdhCurve
     },
     true,
     ["deriveBits"]
@@ -75,8 +132,10 @@ export async function createLocalHello(identity: Identity, role: PeerRole): Prom
   const publicRaw = await crypto.subtle.exportKey("raw", ecdh.publicKey);
   const unsigned = {
     type: "session_hello",
-    protocol: "secure-chat-v1",
+    protocol: SESSION_PROTOCOL,
     role,
+    encryptionProfile: profile.id,
+    layerCount: profile.layerCount,
     identityPublicJwk: identity.publicJwk,
     identityFingerprint: identity.fingerprint,
     ecdhPublicKey: bytesToBase64(arrayBufferToBytes(publicRaw)),
@@ -95,6 +154,8 @@ export async function createLocalHello(identity: Identity, role: PeerRole): Prom
 }
 
 export async function establishSecureSession(state: HandshakeState): Promise<SecureSession> {
+  const profile = encryptionProfileConfig(state.localHello.encryptionProfile);
+  validateHelloProfile(state.localHello, profile);
   await validateRemoteHello(state.remoteHello);
   const remotePublicKey = await importPublicSigningKey(state.remoteHello.identityPublicJwk);
   const signatureOk = await verifyBytes(
@@ -107,12 +168,17 @@ export async function establishSecureSession(state: HandshakeState): Promise<Sec
     throw new Error("Peer identity signature is invalid");
   }
 
+  if (state.remoteHello.encryptionProfile !== state.localHello.encryptionProfile) {
+    throw new Error("Peer encryption profile does not match this session");
+  }
+  validateHelloProfile(state.remoteHello, profile);
+
   const remoteEcdh = await crypto.subtle.importKey(
     "raw",
     bytesToArrayBuffer(base64ToBytes(state.remoteHello.ecdhPublicKey)),
     {
       name: "ECDH",
-      namedCurve: "P-384"
+      namedCurve: profile.ecdhCurve
     },
     true,
     []
@@ -124,16 +190,24 @@ export async function establishSecureSession(state: HandshakeState): Promise<Sec
       public: remoteEcdh
     },
     state.localEcdh.privateKey,
-    384
+    profile.ecdhBits
   );
 
-  const transcriptHash = await sha384(transcriptBytes(state.localHello, state.remoteHello));
+  const transcriptHash = await digest(profile.hash, transcriptBytes(state.localHello, state.remoteHello));
   const keyMaterial = await crypto.subtle.importKey("raw", sharedBits, "HKDF", false, ["deriveKey"]);
-  const sendKey = await deriveAesKey(keyMaterial, transcriptHash, keyInfo(state.identity.fingerprint, state.remoteHello.identityFingerprint));
-  const receiveKey = await deriveAesKey(
+  const sendKeys = await deriveAesKeys(
     keyMaterial,
     transcriptHash,
-    keyInfo(state.remoteHello.identityFingerprint, state.identity.fingerprint)
+    profile,
+    state.identity.fingerprint,
+    state.remoteHello.identityFingerprint
+  );
+  const receiveKeys = await deriveAesKeys(
+    keyMaterial,
+    transcriptHash,
+    profile,
+    state.remoteHello.identityFingerprint,
+    state.identity.fingerprint
   );
 
   let sendSeq = 0;
@@ -142,37 +216,55 @@ export async function establishSecureSession(state: HandshakeState): Promise<Sec
   return {
     peerFingerprint: state.remoteHello.identityFingerprint,
     peerPublicJwk: state.remoteHello.identityPublicJwk,
+    encryptionProfile: profile.id,
+    layerCount: profile.layerCount,
     async encrypt(frame: PlainFrame): Promise<EncryptedEnvelope> {
       sendSeq += 1;
-      const nonce = randomBytes(12);
-      const aad = JSON.stringify({
-        version: 1,
+      const metadata = {
+        version: ENVELOPE_VERSION,
         seq: sendSeq,
-        senderFingerprint: state.identity.fingerprint
-      });
-      const plaintext = utf8ToBytes(JSON.stringify(frame));
-      const ciphertext = await crypto.subtle.encrypt(
-        {
-          name: "AES-GCM",
-          iv: bytesToArrayBuffer(nonce),
-          additionalData: bytesToArrayBuffer(utf8ToBytes(aad))
-        },
-        sendKey,
-        bytesToArrayBuffer(plaintext)
-      );
+        senderFingerprint: state.identity.fingerprint,
+        encryptionProfile: profile.id,
+        layerCount: profile.layerCount
+      } satisfies EncryptedFrameMetadata;
+      const nonces: string[] = [];
+      let ciphertext = utf8ToBytes(JSON.stringify(frame));
+
+      for (let layerIndex = 0; layerIndex < sendKeys.length; layerIndex += 1) {
+        const nonce = randomBytes(12);
+        const encrypted = await crypto.subtle.encrypt(
+          {
+            name: "AES-GCM",
+            iv: bytesToArrayBuffer(nonce),
+            additionalData: layerAad(metadata, layerIndex)
+          },
+          sendKeys[layerIndex],
+          bytesToArrayBuffer(ciphertext)
+        );
+        nonces.push(bytesToBase64(nonce));
+        ciphertext = arrayBufferToBytes(encrypted);
+      }
 
       return {
         type: "encrypted",
-        version: 1,
+        version: ENVELOPE_VERSION,
         seq: sendSeq,
-        nonce: bytesToBase64(nonce),
+        nonces,
         senderFingerprint: state.identity.fingerprint,
-        aad,
-        ciphertext: bytesToBase64(arrayBufferToBytes(ciphertext))
+        encryptionProfile: profile.id,
+        layerCount: profile.layerCount,
+        aad: frameAad(metadata),
+        ciphertext: bytesToBase64(ciphertext)
       };
     },
     async decrypt(envelope: EncryptedEnvelope): Promise<PlainFrame> {
-      if (envelope.version !== 1 || envelope.senderFingerprint !== state.remoteHello.identityFingerprint) {
+      if (
+        envelope.version !== ENVELOPE_VERSION ||
+        envelope.senderFingerprint !== state.remoteHello.identityFingerprint ||
+        envelope.encryptionProfile !== profile.id ||
+        envelope.layerCount !== profile.layerCount ||
+        envelope.nonces.length !== profile.layerCount
+      ) {
         throw new Error("Encrypted frame metadata does not match this session");
       }
 
@@ -180,36 +272,46 @@ export async function establishSecureSession(state: HandshakeState): Promise<Sec
         throw new Error("Replay or out-of-order encrypted frame rejected");
       }
 
-      const expectedAad = JSON.stringify({
-        version: 1,
+      const metadata = {
+        version: ENVELOPE_VERSION,
         seq: envelope.seq,
-        senderFingerprint: envelope.senderFingerprint
-      });
+        senderFingerprint: envelope.senderFingerprint,
+        encryptionProfile: envelope.encryptionProfile,
+        layerCount: envelope.layerCount
+      } satisfies EncryptedFrameMetadata;
+      const expectedAad = frameAad(metadata);
 
       if (envelope.aad !== expectedAad) {
         throw new Error("Encrypted frame AAD mismatch");
       }
 
-      const plaintext = await crypto.subtle.decrypt(
-        {
-          name: "AES-GCM",
-          iv: bytesToArrayBuffer(base64ToBytes(envelope.nonce)),
-          additionalData: bytesToArrayBuffer(utf8ToBytes(envelope.aad))
-        },
-        receiveKey,
-        bytesToArrayBuffer(base64ToBytes(envelope.ciphertext))
-      );
+      let plaintext = base64ToBytes(envelope.ciphertext);
+      for (let layerIndex = receiveKeys.length - 1; layerIndex >= 0; layerIndex -= 1) {
+        const decrypted = await crypto.subtle.decrypt(
+          {
+            name: "AES-GCM",
+            iv: bytesToArrayBuffer(base64ToBytes(envelope.nonces[layerIndex])),
+            additionalData: layerAad(metadata, layerIndex)
+          },
+          receiveKeys[layerIndex],
+          bytesToArrayBuffer(plaintext)
+        );
+        plaintext = arrayBufferToBytes(decrypted);
+      }
+
       highestReceivedSeq = envelope.seq;
-      return JSON.parse(bytesToUtf8(arrayBufferToBytes(plaintext))) as PlainFrame;
+      return JSON.parse(bytesToUtf8(plaintext)) as PlainFrame;
     }
   };
 }
 
 export async function validateRemoteHello(hello: SessionHello): Promise<void> {
-  if (hello.protocol !== "secure-chat-v1") {
+  if (hello.protocol !== SESSION_PROTOCOL) {
     throw new Error("Unsupported peer protocol");
   }
 
+  const profile = encryptionProfileConfig(hello.encryptionProfile);
+  validateHelloProfile(hello, profile);
   const key = await importPublicSigningKey(hello.identityPublicJwk);
   const fingerprint = await fingerprintPublicKey(key);
   if (fingerprint !== hello.identityFingerprint) {
@@ -227,11 +329,21 @@ function withoutSignature(hello: SessionHello): Omit<SessionHello, "signature"> 
     type: hello.type,
     protocol: hello.protocol,
     role: hello.role,
+    encryptionProfile: hello.encryptionProfile,
+    layerCount: hello.layerCount,
     identityPublicJwk: hello.identityPublicJwk,
     identityFingerprint: hello.identityFingerprint,
     ecdhPublicKey: hello.ecdhPublicKey,
     nonce: hello.nonce
   };
+}
+
+interface EncryptedFrameMetadata {
+  version: 2;
+  seq: number;
+  senderFingerprint: string;
+  encryptionProfile: EncryptionProfileId;
+  layerCount: number;
 }
 
 function canonicalBytes(value: unknown): Uint8Array {
@@ -254,13 +366,20 @@ function stableStringify(value: unknown): string {
     .join(",")}}`;
 }
 
-async function sha384(bytes: Uint8Array): Promise<Uint8Array> {
-  const digest = await crypto.subtle.digest("SHA-384", bytesToArrayBuffer(bytes));
+async function digest(hash: EncryptionProfile["hash"], bytes: Uint8Array): Promise<Uint8Array> {
+  const digest = await crypto.subtle.digest(hash, bytesToArrayBuffer(bytes));
   return arrayBufferToBytes(digest);
 }
 
-function keyInfo(senderFingerprint: string, receiverFingerprint: string): Uint8Array {
-  return utf8ToBytes(`secure-chat-v1:${senderFingerprint}->${receiverFingerprint}`);
+function keyInfo(
+  profile: EncryptionProfile,
+  senderFingerprint: string,
+  receiverFingerprint: string,
+  layerIndex: number
+): Uint8Array {
+  return utf8ToBytes(
+    `${SESSION_PROTOCOL}:${profile.id}:${profile.layerCount}:layer-${layerIndex}:${senderFingerprint}->${receiverFingerprint}`
+  );
 }
 
 function transcriptBytes(first: SessionHello, second: SessionHello): Uint8Array {
@@ -272,11 +391,37 @@ function transcriptBytes(first: SessionHello, second: SessionHello): Uint8Array 
   return concatBytes(canonicalBytes(hostHello), canonicalBytes(joinerHello));
 }
 
-async function deriveAesKey(keyMaterial: CryptoKey, salt: Uint8Array, info: Uint8Array): Promise<CryptoKey> {
+async function deriveAesKeys(
+  keyMaterial: CryptoKey,
+  salt: Uint8Array,
+  profile: EncryptionProfile,
+  senderFingerprint: string,
+  receiverFingerprint: string
+): Promise<CryptoKey[]> {
+  const keys: CryptoKey[] = [];
+  for (let layerIndex = 0; layerIndex < profile.layerCount; layerIndex += 1) {
+    keys.push(
+      await deriveAesKey(
+        keyMaterial,
+        salt,
+        keyInfo(profile, senderFingerprint, receiverFingerprint, layerIndex),
+        profile.hash
+      )
+    );
+  }
+  return keys;
+}
+
+async function deriveAesKey(
+  keyMaterial: CryptoKey,
+  salt: Uint8Array,
+  info: Uint8Array,
+  hash: EncryptionProfile["hash"]
+): Promise<CryptoKey> {
   return crypto.subtle.deriveKey(
     {
       name: "HKDF",
-      hash: "SHA-384",
+      hash,
       salt: bytesToArrayBuffer(salt),
       info: bytesToArrayBuffer(info)
     },
@@ -288,4 +433,22 @@ async function deriveAesKey(keyMaterial: CryptoKey, salt: Uint8Array, info: Uint
     false,
     ["encrypt", "decrypt"]
   );
+}
+
+function encryptionProfileConfig(id: EncryptionProfileId): EncryptionProfile {
+  return ENCRYPTION_PROFILES[id];
+}
+
+function validateHelloProfile(hello: SessionHello, profile: EncryptionProfile): void {
+  if (hello.encryptionProfile !== profile.id || hello.layerCount !== profile.layerCount) {
+    throw new Error("Unsupported encryption profile");
+  }
+}
+
+function frameAad(metadata: EncryptedFrameMetadata): string {
+  return JSON.stringify(metadata);
+}
+
+function layerAad(metadata: EncryptedFrameMetadata, layerIndex: number): ArrayBuffer {
+  return bytesToArrayBuffer(utf8ToBytes(JSON.stringify({ ...metadata, layerIndex })));
 }

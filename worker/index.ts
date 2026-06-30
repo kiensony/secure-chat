@@ -4,6 +4,7 @@ interface Env {
 }
 
 type PeerRole = "host" | "joiner";
+type EncryptionProfileId = "standard" | "high_assurance";
 
 interface PeerSocket extends WebSocket {
   roomCode?: string;
@@ -15,14 +16,15 @@ interface PeerSocket extends WebSocket {
 interface Room {
   code: string;
   host: PeerSocket;
+  encryptionProfile: EncryptionProfileId;
   joiner?: PeerSocket;
   expiresAt: number;
   timeout: ReturnType<typeof setTimeout>;
 }
 
 type ClientSignal =
-  | { type: "create_room" }
-  | { type: "join_room"; code: string }
+  | { type: "create_room"; encryptionProfile: EncryptionProfileId }
+  | { type: "join_room"; code: string; encryptionProfile: EncryptionProfileId }
   | { type: "offer"; payload: unknown }
   | { type: "answer"; payload: unknown }
   | { type: "ice_candidate"; payload: unknown }
@@ -103,10 +105,10 @@ export class SignalingLobby {
   private handleSignal(socket: PeerSocket, message: ClientSignal): void {
     switch (message.type) {
       case "create_room":
-        this.createRoom(socket);
+        this.createRoom(socket, message.encryptionProfile);
         return;
       case "join_room":
-        this.joinRoom(socket, message.code);
+        this.joinRoom(socket, message.code, message.encryptionProfile);
         return;
       case "offer":
       case "answer":
@@ -119,13 +121,14 @@ export class SignalingLobby {
     }
   }
 
-  private createRoom(host: PeerSocket): void {
+  private createRoom(host: PeerSocket, encryptionProfile: EncryptionProfileId): void {
     this.leaveRoom(host);
     const code = this.createUniqueCode();
     const expiresAt = Date.now() + ROOM_TTL_MS;
     const room: Room = {
       code,
       host,
+      encryptionProfile,
       expiresAt,
       timeout: setTimeout(() => {
         this.closeRoom(code, "Pairing code expired");
@@ -138,7 +141,7 @@ export class SignalingLobby {
     send(host, { type: "room_created", code, expiresAt });
   }
 
-  private joinRoom(joiner: PeerSocket, code: string): void {
+  private joinRoom(joiner: PeerSocket, code: string, encryptionProfile: EncryptionProfileId): void {
     this.leaveRoom(joiner);
     const room = this.rooms.get(code);
     if (!room || room.expiresAt <= Date.now()) {
@@ -146,6 +149,11 @@ export class SignalingLobby {
         this.closeRoom(code, "Pairing code expired");
       }
       sendError(joiner, "Pairing code is expired or unknown");
+      return;
+    }
+
+    if (room.encryptionProfile !== encryptionProfile) {
+      sendError(joiner, "Encryption profile does not match this room");
       return;
     }
 
@@ -256,10 +264,17 @@ function parseClientSignal(raw: string | ArrayBuffer): ClientSignal {
 
   switch (value.type) {
     case "create_room":
-      return { type: "create_room" };
+      if (isEncryptionProfileId(value.encryptionProfile)) {
+        return { type: "create_room", encryptionProfile: value.encryptionProfile };
+      }
+      break;
     case "join_room":
-      if (typeof value.code === "string" && /^\d{10}$/.test(value.code)) {
-        return { type: "join_room", code: value.code };
+      if (
+        typeof value.code === "string" &&
+        /^\d{10}$/.test(value.code) &&
+        isEncryptionProfileId(value.encryptionProfile)
+      ) {
+        return { type: "join_room", code: value.code, encryptionProfile: value.encryptionProfile };
       }
       break;
     case "offer":
@@ -295,6 +310,10 @@ function randomUint64(): bigint {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isEncryptionProfileId(value: unknown): value is EncryptionProfileId {
+  return value === "standard" || value === "high_assurance";
 }
 
 function send(socket: WebSocket, payload: unknown): void {

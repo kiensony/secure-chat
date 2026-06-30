@@ -29,6 +29,7 @@ export interface SignalingServerHandle {
 }
 
 type PeerRole = "host" | "joiner";
+type EncryptionProfileId = "standard" | "high_assurance";
 
 interface PeerSocket extends WebSocket {
   roomCode?: string;
@@ -40,14 +41,21 @@ interface PeerSocket extends WebSocket {
 interface Room {
   code: string;
   host: PeerSocket;
+  encryptionProfile: EncryptionProfileId;
   joiner?: PeerSocket;
   expiresAt: number;
   timeout: NodeJS.Timeout;
 }
 
+const encryptionProfileSchema = z.union([z.literal("standard"), z.literal("high_assurance")]);
+
 const signalPayloadSchema = z.union([
-  z.object({ type: z.literal("create_room") }),
-  z.object({ type: z.literal("join_room"), code: z.string().regex(/^\d{10}$/) }),
+  z.object({ type: z.literal("create_room"), encryptionProfile: encryptionProfileSchema }),
+  z.object({
+    type: z.literal("join_room"),
+    code: z.string().regex(/^\d{10}$/),
+    encryptionProfile: encryptionProfileSchema
+  }),
   z.object({ type: z.literal("offer"), payload: z.unknown() }),
   z.object({ type: z.literal("answer"), payload: z.unknown() }),
   z.object({ type: z.literal("ice_candidate"), payload: z.unknown() }),
@@ -126,10 +134,10 @@ export function createSignalingServer(options: SignalingServerOptions = {}): Sig
   function handleSignal(socket: PeerSocket, message: z.infer<typeof signalPayloadSchema>): void {
     switch (message.type) {
       case "create_room":
-        createRoom(socket);
+        createRoom(socket, message.encryptionProfile);
         return;
       case "join_room":
-        joinRoom(socket, message.code);
+        joinRoom(socket, message.code, message.encryptionProfile);
         return;
       case "offer":
       case "answer":
@@ -142,13 +150,14 @@ export function createSignalingServer(options: SignalingServerOptions = {}): Sig
     }
   }
 
-  function createRoom(host: PeerSocket): void {
+  function createRoom(host: PeerSocket, encryptionProfile: EncryptionProfileId): void {
     leaveRoom(host);
     const code = createUniqueCode(rooms);
     const expiresAt = Date.now() + ttlMs;
     const room: Room = {
       code,
       host,
+      encryptionProfile,
       expiresAt,
       timeout: setTimeout(() => {
         closeRoom(code, "Pairing code expired");
@@ -161,11 +170,16 @@ export function createSignalingServer(options: SignalingServerOptions = {}): Sig
     send(host, { type: "room_created", code, expiresAt });
   }
 
-  function joinRoom(joiner: PeerSocket, code: string): void {
+  function joinRoom(joiner: PeerSocket, code: string, encryptionProfile: EncryptionProfileId): void {
     leaveRoom(joiner);
     const room = rooms.get(code);
     if (!room || room.expiresAt <= Date.now()) {
       sendError(joiner, "Pairing code is expired or unknown");
+      return;
+    }
+
+    if (room.encryptionProfile !== encryptionProfile) {
+      sendError(joiner, "Encryption profile does not match this room");
       return;
     }
 

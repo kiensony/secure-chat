@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { createSignalingServer, type SignalingServerHandle } from "../server/signalingServer";
 
+const STANDARD_PROFILE = "standard";
+
 describe("signaling server", () => {
   let server: SignalingServerHandle;
   let url: string;
@@ -31,34 +33,47 @@ describe("signaling server", () => {
 
   it("creates a short-lived 10-digit room and joins it once", async () => {
     const host = await openSocket(url, sockets);
-    host.send(JSON.stringify({ type: "create_room" }));
+    host.send(JSON.stringify({ type: "create_room", encryptionProfile: STANDARD_PROFILE }));
     const created = await nextJson(host);
 
     expect(created).toMatchObject({ type: "room_created" });
     expect(created.code).toMatch(/^\d{10}$/);
 
     const joiner = await openSocket(url, sockets);
-    joiner.send(JSON.stringify({ type: "join_room", code: created.code }));
+    joiner.send(JSON.stringify({ type: "join_room", code: created.code, encryptionProfile: STANDARD_PROFILE }));
 
     await expect(nextJson(host)).resolves.toMatchObject({ type: "peer_joined" });
     await expect(nextJson(joiner)).resolves.toMatchObject({ type: "peer_joined" });
 
     const secondJoiner = await openSocket(url, sockets);
-    secondJoiner.send(JSON.stringify({ type: "join_room", code: created.code }));
+    secondJoiner.send(JSON.stringify({ type: "join_room", code: created.code, encryptionProfile: STANDARD_PROFILE }));
     await expect(nextJson(secondJoiner)).resolves.toMatchObject({
       type: "error",
       message: "Pairing code already used"
     });
   });
 
+  it("rejects joiners that choose a different encryption profile", async () => {
+    const host = await openSocket(url, sockets);
+    host.send(JSON.stringify({ type: "create_room", encryptionProfile: "high_assurance" }));
+    const created = await nextJson(host);
+
+    const joiner = await openSocket(url, sockets);
+    joiner.send(JSON.stringify({ type: "join_room", code: created.code, encryptionProfile: STANDARD_PROFILE }));
+    await expect(nextJson(joiner)).resolves.toMatchObject({
+      type: "error",
+      message: "Encryption profile does not match this room"
+    });
+  });
+
   it("rejects expired, malformed, and invalid messages without crashing", async () => {
     const host = await openSocket(url, sockets);
-    host.send(JSON.stringify({ type: "create_room" }));
+    host.send(JSON.stringify({ type: "create_room", encryptionProfile: STANDARD_PROFILE }));
     const created = await nextJson(host);
     await nextJson(host);
 
     const lateJoiner = await openSocket(url, sockets);
-    lateJoiner.send(JSON.stringify({ type: "join_room", code: created.code }));
+    lateJoiner.send(JSON.stringify({ type: "join_room", code: created.code, encryptionProfile: STANDARD_PROFILE }));
     await expect(nextJson(lateJoiner)).resolves.toMatchObject({
       type: "error",
       message: "Pairing code is expired or unknown"
@@ -73,14 +88,14 @@ describe("signaling server", () => {
 
   it("relays offer, answer, and ICE only after both peers join", async () => {
     const host = await openSocket(url, sockets);
-    host.send(JSON.stringify({ type: "create_room" }));
+    host.send(JSON.stringify({ type: "create_room", encryptionProfile: STANDARD_PROFILE }));
     const created = await nextJson(host);
 
     host.send(JSON.stringify({ type: "offer", payload: { type: "offer", sdp: "before-peer" } }));
     await expect(nextJson(host)).resolves.toMatchObject({ type: "error", message: "No connected peer" });
 
     const joiner = await openSocket(url, sockets);
-    joiner.send(JSON.stringify({ type: "join_room", code: created.code }));
+    joiner.send(JSON.stringify({ type: "join_room", code: created.code, encryptionProfile: STANDARD_PROFILE }));
     await nextJson(host);
     await nextJson(joiner);
 
@@ -107,7 +122,7 @@ describe("signaling server", () => {
     const socket = await openSocket(url, sockets);
 
     for (let index = 0; index < 4; index += 1) {
-      socket.send(JSON.stringify({ type: "join_room", code: "0000000000" }));
+      socket.send(JSON.stringify({ type: "join_room", code: "0000000000", encryptionProfile: STANDARD_PROFILE }));
     }
 
     await expect(nextJson(socket)).resolves.toMatchObject({ type: "error" });

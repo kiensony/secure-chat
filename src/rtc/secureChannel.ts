@@ -1,6 +1,8 @@
 import {
+  ENCRYPTION_PROFILES,
   createLocalHello,
   establishSecureSession,
+  type EncryptionProfileId,
   type EncryptedEnvelope,
   type PeerRole,
   type PlainFrame,
@@ -27,6 +29,7 @@ export class SecureChannel {
     private readonly channel: RTCDataChannel,
     private readonly identity: Identity,
     private readonly role: PeerRole,
+    private readonly encryptionProfile: EncryptionProfileId,
     private readonly events: SecureChannelEvents
   ) {
     this.channel.binaryType = "arraybuffer";
@@ -56,7 +59,7 @@ export class SecureChannel {
 
   private async sendLocalHello(): Promise<void> {
     try {
-      const local = await createLocalHello(this.identity, this.role);
+      const local = await createLocalHello(this.identity, this.role, this.encryptionProfile);
       this.localHello = local.hello;
       this.localEcdh = local.ecdh;
       this.channel.send(JSON.stringify(local.hello));
@@ -135,10 +138,13 @@ export class SecureChannel {
 
 function isSessionHello(value: unknown): value is SessionHello {
   const frame = value as SessionHello;
+  const expectedProfile = frame ? ENCRYPTION_PROFILES[frame.encryptionProfile] : undefined;
   return (
     frame?.type === "session_hello" &&
-    frame.protocol === "secure-chat-v1" &&
+    frame.protocol === "secure-chat-v2" &&
     (frame.role === "host" || frame.role === "joiner") &&
+    Boolean(expectedProfile) &&
+    frame.layerCount === expectedProfile?.layerCount &&
     typeof frame.identityFingerprint === "string" &&
     typeof frame.ecdhPublicKey === "string" &&
     typeof frame.nonce === "string" &&
@@ -151,10 +157,13 @@ function isEncryptedEnvelope(value: unknown): value is EncryptedEnvelope {
   const frame = value as EncryptedEnvelope;
   return (
     frame?.type === "encrypted" &&
-    frame.version === 1 &&
+    frame.version === 2 &&
     typeof frame.seq === "number" &&
-    typeof frame.nonce === "string" &&
+    Array.isArray(frame.nonces) &&
+    frame.nonces.every((nonce) => typeof nonce === "string") &&
     typeof frame.senderFingerprint === "string" &&
+    (frame.encryptionProfile === "standard" || frame.encryptionProfile === "high_assurance") &&
+    typeof frame.layerCount === "number" &&
     typeof frame.aad === "string" &&
     typeof frame.ciphertext === "string"
   );

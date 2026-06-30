@@ -14,6 +14,11 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatFingerprint } from "./crypto/encoding";
 import {
+  DEFAULT_ENCRYPTION_PROFILE,
+  ENCRYPTION_PROFILES,
+  type EncryptionProfileId
+} from "./crypto/session";
+import {
   createIdentity,
   importIdentityFromBackup,
   parseBackup,
@@ -72,6 +77,7 @@ export default function App() {
   const [joinCode, setJoinCode] = useState("");
   const [roomCode, setRoomCode] = useState("");
   const [pairingMode, setPairingMode] = useState<PairingMode>("server");
+  const [encryptionProfile, setEncryptionProfile] = useState<EncryptionProfileId>(DEFAULT_ENCRYPTION_PROFILE);
   const [manualOffer, setManualOffer] = useState("");
   const [manualAnswer, setManualAnswer] = useState("");
   const [manualInput, setManualInput] = useState("");
@@ -109,6 +115,8 @@ export default function App() {
   const expectsManualAnswer = role === "host" && Boolean(manualOffer);
   const canAcceptManualOffer = trimmedManualInput.length > 0 && role === null;
   const canAcceptManualAnswer = trimmedManualInput.length > 0 && expectsManualAnswer;
+  const encryptionProfileLocked = role !== null || Boolean(roomCode || peerFingerprint || manualOffer || manualAnswer);
+  const selectedEncryptionProfile = ENCRYPTION_PROFILES[encryptionProfile];
 
   useEffect(() => {
     void loadStoredIdentity()
@@ -203,9 +211,12 @@ export default function App() {
       setStatus("Create or import an identity first");
       return;
     }
+    const selectedProfile = encryptionProfile;
     setRole("host");
     roleRef.current = "host";
-    connectSignaling("host", () => signalingRef.current?.send({ type: "create_room" }));
+    connectSignaling("host", () =>
+      signalingRef.current?.send({ type: "create_room", encryptionProfile: selectedProfile })
+    );
   }
 
   function joinRoom(): void {
@@ -222,7 +233,10 @@ export default function App() {
 
     setRole("joiner");
     roleRef.current = "joiner";
-    connectSignaling("joiner", () => signalingRef.current?.send({ type: "join_room", code: normalized }));
+    const selectedProfile = encryptionProfile;
+    connectSignaling("joiner", () =>
+      signalingRef.current?.send({ type: "join_room", code: normalized, encryptionProfile: selectedProfile })
+    );
   }
 
   function disconnect(): void {
@@ -271,7 +285,7 @@ export default function App() {
         setStatus("Create or import an identity first");
         return;
       }
-      const offer = decodeManualPackage(manualInput, "offer");
+      const offer = decodeManualPackage(manualInput, "offer", encryptionProfile);
       disconnect();
       setPairingMode("manual");
       setRole("joiner");
@@ -294,7 +308,7 @@ export default function App() {
       if (!peerRef.current || roleRef.current !== "host") {
         throw new Error("Create a manual offer before accepting an answer");
       }
-      const answer = decodeManualPackage(manualInput, "answer");
+      const answer = decodeManualPackage(manualInput, "answer", encryptionProfile);
       await peerRef.current.acceptManualAnswer(answer);
       setStatus("Manual answer accepted. Waiting for secure channel.");
     } catch (error) {
@@ -488,25 +502,32 @@ export default function App() {
       return;
     }
 
-    peerRef.current = new SecurePeerConnection(peerRole, currentIdentity, transport === "server" ? (signal) => signalingRef.current?.send(signal) : null, {
-      onSecureReady: (fingerprint) => {
-        setPeerFingerprint(fingerprint);
-        const trusted = isTrustedPeer(fingerprint);
-        verifiedRef.current = trusted;
-        setVerified(trusted);
-        setStatus(trusted ? "Trusted peer connected" : "Secure session ready. Verify peer fingerprint.");
-        addSystemMessage(
-          trusted
-            ? "Known peer fingerprint matched. Encrypted chat is enabled."
-            : "Compare the peer fingerprint out of band before sending messages."
-        );
+    peerRef.current = new SecurePeerConnection(
+      peerRole,
+      currentIdentity,
+      encryptionProfile,
+      transport === "server" ? (signal) => signalingRef.current?.send(signal) : null,
+      {
+        onSecureReady: (fingerprint) => {
+          setPeerFingerprint(fingerprint);
+          const trusted = isTrustedPeer(fingerprint);
+          verifiedRef.current = trusted;
+          setVerified(trusted);
+          setStatus(trusted ? "Trusted peer connected" : "Secure session ready. Verify peer fingerprint.");
+          addSystemMessage(
+            trusted
+              ? "Known peer fingerprint matched. Encrypted chat is enabled."
+              : "Compare the peer fingerprint out of band before sending messages."
+          );
+        },
+        onFrame: (frame) => {
+          void handleSecureFrame(frame);
+        },
+        onStatus: (nextStatus) => setStatus(nextStatus),
+        onError: (error) => setStatus(error.message)
       },
-      onFrame: (frame) => {
-        void handleSecureFrame(frame);
-      },
-      onStatus: (nextStatus) => setStatus(nextStatus),
-      onError: (error) => setStatus(error.message)
-    }, buildIceServers(transport));
+      buildIceServers(transport)
+    );
   }
 
   async function handleSecureFrame(frame: { kind: string; payload: unknown }): Promise<void> {
@@ -749,6 +770,32 @@ export default function App() {
 
         <section className="panel">
           <h2>Pairing</h2>
+          <div className="profile-control">
+            <span>Encryption</span>
+            <div className="segmented-control" aria-label="Encryption profile">
+              <button
+                type="button"
+                data-testid="encryption-standard"
+                className={encryptionProfile === "standard" ? "active" : "secondary"}
+                onClick={() => setEncryptionProfile("standard")}
+                disabled={encryptionProfileLocked}
+              >
+                Standard
+              </button>
+              <button
+                type="button"
+                data-testid="encryption-high-assurance"
+                className={encryptionProfile === "high_assurance" ? "active" : "secondary"}
+                onClick={() => setEncryptionProfile("high_assurance")}
+                disabled={encryptionProfileLocked}
+              >
+                High Assurance
+              </button>
+            </div>
+            <p className="profile-note">
+              {selectedEncryptionProfile.layerCount === 7 ? "AES-GCM-256 x 7" : "AES-GCM-256"}
+            </p>
+          </div>
           <div className="segmented-control" aria-label="Pairing mode">
             <button
               type="button"
@@ -1040,7 +1087,11 @@ function encodeManualPackage(value: ManualSessionPackage): string {
   return JSON.stringify(value);
 }
 
-function decodeManualPackage(value: string, expectedType: ManualSessionPackage["type"]): ManualSessionPackage {
+function decodeManualPackage(
+  value: string,
+  expectedType: ManualSessionPackage["type"],
+  expectedProfile: EncryptionProfileId
+): ManualSessionPackage {
   const trimmed = value.trim();
   if (!trimmed) {
     throw new Error(`Paste a manual ${expectedType} package first`);
@@ -1055,9 +1106,10 @@ function decodeManualPackage(value: string, expectedType: ManualSessionPackage["
 
   const description = parsed.description as RTCSessionDescriptionInit | undefined;
   if (
-    parsed?.version !== 1 ||
+    parsed?.version !== 2 ||
     (parsed.type !== "offer" && parsed.type !== "answer") ||
     parsed.type !== expectedType ||
+    parsed.encryptionProfile !== expectedProfile ||
     !description ||
     description.type !== expectedType ||
     typeof description.sdp !== "string" ||

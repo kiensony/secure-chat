@@ -214,6 +214,22 @@ p {
   color: #071015;
 }
 
+.profile-control {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.profile-control > span,
+.profile-note {
+  color: #a8b5bd;
+  font-size: 13px;
+}
+
+.profile-note {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
 .manual-pairing {
   display: grid;
   gap: 10px;
