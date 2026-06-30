@@ -224,6 +224,8 @@ Deploy:
 npm run deploy:cloudflare
 ```
 
+Automatic deployment is configured with GitHub Actions on pushes to `main`. Add `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` as GitHub Actions repository secrets before relying on CI/CD.
+
 See [`docs/cloudflare-deployment.md`](docs/cloudflare-deployment.md) for first-time login, custom domain, and verification steps.
 
 ## HTTPS And LAN Testing

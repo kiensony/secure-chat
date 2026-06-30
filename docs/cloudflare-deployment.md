@@ -97,6 +97,29 @@ zone_name = "example.com"
 
 Use your real zone and hostname.
 
+## GitHub Actions CI/CD
+
+The repo includes `.github/workflows/cloudflare.yml`.
+
+It runs on:
+
+- Pull requests into `main`: install, typecheck, lint, tests, build, security check, and `wrangler deploy --dry-run`.
+- Pushes to `main`: the same CI checks, then deploys to Cloudflare.
+- Manual `workflow_dispatch`: runs CI and deploys from the selected branch.
+
+Create these GitHub repository secrets before relying on auto deploy:
+
+- `CLOUDFLARE_ACCOUNT_ID`: your Cloudflare account ID.
+- `CLOUDFLARE_API_TOKEN`: a Cloudflare API token with permission to edit Workers for the target account.
+
+In GitHub, add them at:
+
+```text
+Repository Settings -> Secrets and variables -> Actions -> New repository secret
+```
+
+The deploy job uses Cloudflare's official `cloudflare/wrangler-action@v3` action and runs `wrangler deploy`.
+
 ## Verify After Deploy
 
 Check the app:

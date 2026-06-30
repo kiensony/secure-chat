@@ -22,7 +22,8 @@
     "test:server": "vitest run tests/signaling.test.ts",
     "test:e2e": "playwright test --project=chromium",
     "test:security": "node scripts/security-check.mjs && npm audit --audit-level=moderate",
-    "test:all": "npm run typecheck && npm run lint && npm run test:unit && npm run test:server && npm run build && npm run test:security && npm run test:e2e",
+    "test:ci": "npm run typecheck && npm run lint && npm run test:unit && npm run test:server && npm run build && npm run test:security",
+    "test:all": "npm run test:ci && npm run test:e2e",
     "typecheck": "tsc --noEmit && tsc -p server/tsconfig.json --noEmit && tsc -p worker/tsconfig.json --noEmit",
     "lint": "eslint .",
     "deploy:cloudflare": "npm run build:client && npm run build:worker && wrangler deploy"
