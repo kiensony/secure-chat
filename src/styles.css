@@ -300,6 +300,13 @@ p {
   font-size: 22px;
 }
 
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .verify-band {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -483,6 +490,14 @@ p {
     align-items: stretch;
     grid-template-columns: 1fr;
     flex-direction: column;
+  }
+
+  .header-actions {
+    justify-content: stretch;
+  }
+
+  .header-actions > * {
+    flex: 1 1 160px;
   }
 
   .call-actions {

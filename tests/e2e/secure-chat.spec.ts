@@ -18,6 +18,8 @@ test("pairs two clients, verifies fingerprints, chats, and transfers files", asy
   try {
     await Promise.all([host.goto("/"), joiner.goto("/")]);
     await Promise.all([createIdentity(host), createIdentity(joiner)]);
+    await expect(host.getByTestId("download-chat-zip")).toBeDisabled();
+    await expect(host.getByTestId("clear-conversation")).toBeDisabled();
     await host.getByTestId("encryption-high-assurance").click();
     await joiner.getByTestId("encryption-high-assurance").click();
 
@@ -47,6 +49,8 @@ test("pairs two clients, verifies fingerprints, chats, and transfers files", asy
     await expect(joiner.getByTestId("message-input")).toBeEnabled();
     await expect(host.getByTestId("start-call")).toBeEnabled();
     await expect(joiner.getByTestId("start-call")).toBeEnabled();
+    await expect(host.getByTestId("download-chat-zip")).toBeEnabled();
+    await expect(host.getByTestId("clear-conversation")).toBeEnabled();
 
     await host.getByTestId("message-input").fill("hello from host");
     await host.getByTestId("send-message").click();
@@ -96,6 +100,37 @@ test("pairs two clients, verifies fingerprints, chats, and transfers files", asy
     const downloadedPath = await (await fileDownload).path();
     expect(downloadedPath).toBeTruthy();
     await expect(readFile(downloadedPath ?? "", "utf8")).resolves.toBe("accepted secure file");
+
+    const exportDownload = host.waitForEvent("download");
+    await host.getByTestId("download-chat-zip").click();
+    const exportFile = await exportDownload;
+    expect(exportFile.suggestedFilename()).toMatch(/^secure-chat-export-\d{8}-\d{6}\.zip$/);
+    const exportPath = await exportFile.path();
+    expect(exportPath).toBeTruthy();
+    const exportText = (await readFile(exportPath ?? "")).toString("utf8");
+    expect(exportText).toContain("transcript.md");
+    expect(exportText).toContain("transcript.json");
+    expect(exportText).toContain("hello from host");
+    expect(exportText).toContain("chat after call");
+    expect(exportText).toContain("reject-me.txt");
+    expect(exportText).toContain("cancel-me.txt");
+    expect(exportText).toContain("accept-me.txt");
+    expect(exportText).toContain("accepted secure file");
+    expect(exportText).not.toContain("reject me");
+    expect(exportText).not.toContain("cancel me");
+
+    await host.getByTestId("clear-conversation").click();
+    await expect(host.getByTestId("message-sent")).toHaveCount(0);
+    await expect(host.getByTestId("message-received")).toHaveCount(0);
+    await expect(host.getByTestId("message-system")).toHaveCount(0);
+    await expect(host.getByTestId("outgoing-file")).toHaveCount(0);
+    await expect(host.getByTestId("incoming-file")).toHaveCount(0);
+    await expect(host.getByTestId("download-chat-zip")).toBeDisabled();
+    await expect(host.getByTestId("clear-conversation")).toBeDisabled();
+
+    await host.getByTestId("message-input").fill("after local clear");
+    await host.getByTestId("send-message").click();
+    await expect(joiner.getByTestId("message-received").filter({ hasText: "after local clear" })).toBeVisible();
   } finally {
     await hostContext.close();
     await joinerContext.close();
@@ -103,7 +138,7 @@ test("pairs two clients, verifies fingerprints, chats, and transfers files", asy
 });
 
 test("does not leak chat payloads over the signaling websocket during message transmit", async ({ browser }) => {
-  const hostContext = await browser.newContext();
+  const hostContext = await browser.newContext({ acceptDownloads: true });
   const joinerContext = await browser.newContext();
   const host = await hostContext.newPage();
   const joiner = await joinerContext.newPage();
@@ -143,6 +178,13 @@ test("does not leak chat payloads over the signaling websocket during message tr
     await expect(host.getByTestId("message-received").filter({ hasText: joinerMessage })).toBeVisible();
 
     assertNoChatLeakInSignaling(signalingFrames.slice(baselineFrameCount), [hostMessage, joinerMessage]);
+
+    const exportClearBaseline = signalingFrames.length;
+    const exportDownload = host.waitForEvent("download");
+    await host.getByTestId("download-chat-zip").click();
+    await exportDownload;
+    await host.getByTestId("clear-conversation").click();
+    assertNoChatLeakInSignaling(signalingFrames.slice(exportClearBaseline), [hostMessage, joinerMessage]);
   } finally {
     await hostContext.close();
     await joinerContext.close();

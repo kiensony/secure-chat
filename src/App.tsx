@@ -14,6 +14,7 @@ import {
   Play,
   Send,
   ShieldCheck,
+  Trash2,
   Upload,
   X
 } from "lucide-react";
@@ -26,6 +27,12 @@ import {
   type CallEndReason,
   type CallRejectReason
 } from "./callFrames";
+import {
+  createChatExportFileName,
+  createChatExportZip,
+  type ChatExportAttachment,
+  type ChatExportTransfer
+} from "./chatExport";
 import { formatFingerprint } from "./crypto/encoding";
 import {
   DEFAULT_ENCRYPTION_PROFILE,
@@ -72,15 +79,26 @@ interface IncomingOfferView {
   offer: FileOfferPayload;
   status: "pending" | "receiving" | "complete" | "rejected";
   receivedBytes: number;
+  offeredAt: number;
+  completedAt?: number;
   downloadUrl?: string;
 }
 
 interface OutgoingFileView {
   fileId: string;
+  offer: FileOfferPayload;
   name: string;
   sentBytes: number;
   totalBytes: number;
   status: "offered" | "sending" | "complete" | "rejected" | "cancelled";
+  offeredAt: number;
+  completedAt?: number;
+}
+
+interface RetainedAttachment extends ChatExportAttachment {
+  direction: "sent" | "received";
+  fileId: string;
+  sha256: string;
 }
 
 export default function App() {
@@ -126,9 +144,12 @@ export default function App() {
   const pendingOpenActionRef = useRef<(() => void) | null>(null);
   const pendingOutgoingFilesRef = useRef(new Map<string, { offer: FileOfferPayload; bytes: Uint8Array }>());
   const incomingTransfersRef = useRef(new Map<string, IncomingFileState>());
+  const retainedAttachmentsRef = useRef(new Map<string, RetainedAttachment>());
+  const downloadUrlsRef = useRef(new Set<string>());
 
   const canChat = Boolean(identity && peerFingerprint && verified && peerRef.current);
   const canStartCall = canChat && callState === "idle";
+  const hasConversationHistory = messages.length > 0 || incomingFiles.length > 0 || outgoingFiles.length > 0;
   const formattedOwnFingerprint = useMemo(
     () => (identity ? formatFingerprint(identity.fingerprint) : ""),
     [identity]
@@ -194,6 +215,10 @@ export default function App() {
   useEffect(() => {
     return () => {
       clearCallTimeout();
+      revokeAllDownloadUrls();
+      retainedAttachmentsRef.current.clear();
+      pendingOutgoingFilesRef.current.clear();
+      incomingTransfersRef.current.clear();
       signalingRef.current?.close();
       peerRef.current?.close();
     };
@@ -241,6 +266,105 @@ export default function App() {
     setRemoteAudioBlocked(false);
     setCallStateValue("idle");
     setCallStatus(nextStatus);
+  }
+
+  function retainAttachment(attachment: RetainedAttachment): void {
+    retainedAttachmentsRef.current.set(attachmentKey(attachment.direction, attachment.fileId), attachment);
+  }
+
+  function removeRetainedAttachment(direction: RetainedAttachment["direction"], fileId: string): void {
+    retainedAttachmentsRef.current.delete(attachmentKey(direction, fileId));
+  }
+
+  function trackDownloadUrl(url: string): void {
+    downloadUrlsRef.current.add(url);
+  }
+
+  function revokeDownloadUrl(url?: string): void {
+    if (!url || !downloadUrlsRef.current.has(url)) {
+      return;
+    }
+    URL.revokeObjectURL(url);
+    downloadUrlsRef.current.delete(url);
+  }
+
+  function revokeAllDownloadUrls(): void {
+    for (const url of downloadUrlsRef.current) {
+      URL.revokeObjectURL(url);
+    }
+    downloadUrlsRef.current.clear();
+  }
+
+  function clearConversationState(): void {
+    revokeAllDownloadUrls();
+    retainedAttachmentsRef.current.clear();
+    pendingOutgoingFilesRef.current.clear();
+    incomingTransfersRef.current.clear();
+    setMessages([]);
+    setIncomingFiles([]);
+    setOutgoingFiles([]);
+  }
+
+  function clearConversation(): void {
+    if (!hasConversationHistory) {
+      return;
+    }
+    clearConversationState();
+    setStatus("Conversation cleared");
+  }
+
+  function downloadChatZip(): void {
+    if (!hasConversationHistory) {
+      return;
+    }
+
+    const exportedAt = Date.now();
+    const zip = createChatExportZip({
+      exportedAt,
+      role,
+      verified,
+      ownFingerprint: identity?.fingerprint ?? "",
+      peerFingerprint,
+      messages,
+      transfers: buildExportTransfers()
+    });
+    downloadBlob(zip, createChatExportFileName(exportedAt));
+    setStatus("Chat ZIP downloaded");
+  }
+
+  function buildExportTransfers(): ChatExportTransfer[] {
+    return [
+      ...outgoingFiles.map((file): ChatExportTransfer => {
+        const retained = retainedAttachmentsRef.current.get(attachmentKey("sent", file.fileId));
+        return {
+          direction: "sent",
+          fileId: file.fileId,
+          name: file.name,
+          size: file.totalBytes,
+          mimeType: file.offer.mimeType,
+          sha256: file.offer.sha256,
+          status: file.status,
+          offeredAt: file.offeredAt,
+          completedAt: file.completedAt,
+          attachment: retained
+        };
+      }),
+      ...incomingFiles.map((file): ChatExportTransfer => {
+        const retained = retainedAttachmentsRef.current.get(attachmentKey("received", file.offer.fileId));
+        return {
+          direction: "received",
+          fileId: file.offer.fileId,
+          name: file.offer.name,
+          size: file.offer.size,
+          mimeType: file.offer.mimeType,
+          sha256: file.offer.sha256,
+          status: file.status,
+          offeredAt: file.offeredAt,
+          completedAt: file.completedAt,
+          attachment: retained
+        };
+      })
+    ];
   }
 
   async function sendCallControl(frame: CallControlFrame): Promise<void> {
@@ -355,6 +479,7 @@ export default function App() {
 
   function disconnect(): void {
     clearCallTimeout();
+    clearConversationState();
     setCallStateValue("idle");
     setLocalMutedValue(false);
     setRemoteMuted(false);
@@ -478,10 +603,12 @@ export default function App() {
         ...current,
         {
           fileId: outgoing.offer.fileId,
+          offer: outgoing.offer,
           name: outgoing.offer.name,
           sentBytes: 0,
           totalBytes: outgoing.offer.size,
-          status: "offered"
+          status: "offered",
+          offeredAt: Date.now()
         }
       ]);
       await peerRef.current.send({
@@ -519,6 +646,7 @@ export default function App() {
     if (!peerRef.current) {
       return;
     }
+    removeRetainedAttachment("received", offer.fileId);
     setIncomingFiles((current) =>
       current.map((file) => (file.offer.fileId === offer.fileId ? { ...file, status: "rejected" } : file))
     );
@@ -532,6 +660,7 @@ export default function App() {
 
   async function cancelOfferedFile(fileId: string): Promise<void> {
     pendingOutgoingFilesRef.current.delete(fileId);
+    removeRetainedAttachment("sent", fileId);
     setOutgoingFiles((current) =>
       current.map((file) => (file.fileId === fileId ? { ...file, status: "cancelled" } : file))
     );
@@ -824,7 +953,8 @@ export default function App() {
           {
             offer,
             status: "pending",
-            receivedBytes: 0
+            receivedBytes: 0,
+            offeredAt: Date.now()
           }
         ]);
         addSystemMessage(`Incoming file offer: ${offer.name}`);
@@ -848,14 +978,23 @@ export default function App() {
             )
           );
         });
+        retainAttachment({
+          direction: "sent",
+          fileId,
+          fileName: outgoing.offer.name,
+          mimeType: outgoing.offer.mimeType,
+          bytes: outgoing.bytes,
+          sha256: outgoing.offer.sha256
+        });
         setOutgoingFiles((current) =>
-          current.map((file) => (file.fileId === fileId ? { ...file, status: "complete" } : file))
+          current.map((file) => (file.fileId === fileId ? { ...file, status: "complete", completedAt: Date.now() } : file))
         );
         pendingOutgoingFilesRef.current.delete(fileId);
         return;
       }
       case "file_reject": {
         const fileId = readFileId(frame.payload);
+        removeRetainedAttachment("sent", fileId);
         setOutgoingFiles((current) =>
           current.map((file) => (file.fileId === fileId ? { ...file, status: "rejected" } : file))
         );
@@ -886,12 +1025,22 @@ export default function App() {
           return;
         }
         const blob = await completeIncomingFile(current);
+        const bytes = new Uint8Array(await blob.arrayBuffer());
         const downloadUrl = URL.createObjectURL(blob);
+        trackDownloadUrl(downloadUrl);
+        retainAttachment({
+          direction: "received",
+          fileId,
+          fileName: current.offer.name,
+          mimeType: current.offer.mimeType,
+          bytes,
+          sha256: current.offer.sha256
+        });
         incomingTransfersRef.current.delete(fileId);
         setIncomingFiles((files) =>
           files.map((file) =>
             file.offer.fileId === fileId
-              ? { ...file, status: "complete", receivedBytes: file.offer.size, downloadUrl }
+              ? { ...file, status: "complete", receivedBytes: file.offer.size, downloadUrl, completedAt: Date.now() }
               : file
           )
         );
@@ -900,7 +1049,15 @@ export default function App() {
       case "file_cancel": {
         const fileId = readFileId(frame.payload);
         incomingTransfersRef.current.delete(fileId);
-        setIncomingFiles((files) => files.filter((file) => file.offer.fileId !== fileId));
+        removeRetainedAttachment("received", fileId);
+        setIncomingFiles((files) => {
+          for (const file of files) {
+            if (file.offer.fileId === fileId) {
+              revokeDownloadUrl(file.downloadUrl);
+            }
+          }
+          return files.filter((file) => file.offer.fileId !== fileId);
+        });
         return;
       }
       default:
@@ -1203,10 +1360,32 @@ export default function App() {
             <h2>{role ? `${role === "host" ? "Host" : "Joiner"} session` : "No active session"}</h2>
             <p data-testid="connection-status">{status}</p>
           </div>
-          <button type="button" className="secondary" onClick={disconnect} disabled={!role}>
-            <X size={18} />
-            Disconnect
-          </button>
+          <div className="header-actions">
+            <button
+              type="button"
+              className="secondary"
+              data-testid="download-chat-zip"
+              onClick={downloadChatZip}
+              disabled={!hasConversationHistory}
+            >
+              <Download size={18} />
+              Download Chat ZIP
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              data-testid="clear-conversation"
+              onClick={clearConversation}
+              disabled={!hasConversationHistory}
+            >
+              <Trash2 size={18} />
+              Clear Conversation
+            </button>
+            <button type="button" className="secondary" onClick={disconnect} disabled={!role}>
+              <X size={18} />
+              Disconnect
+            </button>
+          </div>
         </header>
 
         {peerFingerprint ? (
@@ -1469,6 +1648,10 @@ function readFileId(value: unknown): string {
     throw new Error("Invalid file control frame");
   }
   return payload.fileId;
+}
+
+function attachmentKey(direction: RetainedAttachment["direction"], fileId: string): string {
+  return `${direction}:${fileId}`;
 }
 
 function downloadBlob(blob: Blob, name: string): void {

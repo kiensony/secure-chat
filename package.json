@@ -18,7 +18,7 @@
     "preview:cloudflare": "npm run build:client && wrangler dev",
     "start": "node dist-server/index.js",
     "test": "npm run test:unit",
-    "test:unit": "vitest run tests/identity.test.ts tests/session.test.ts tests/fileTransfer.test.ts tests/callFrames.test.ts",
+    "test:unit": "vitest run tests/identity.test.ts tests/session.test.ts tests/fileTransfer.test.ts tests/callFrames.test.ts tests/chatExport.test.ts",
     "test:server": "vitest run tests/signaling.test.ts",
     "test:e2e": "playwright test --project=chromium",
     "test:security": "node scripts/security-check.mjs && npm audit --audit-level=moderate",

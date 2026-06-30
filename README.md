@@ -24,6 +24,7 @@ Use it for testing and controlled environments first. Before production use, rev
 - Short-lived 10-digit room codes for normal pairing.
 - Manual offer/answer exchange for users who do not want app-server signaling.
 - Audio-only peer-to-peer voice calls after fingerprint verification.
+- Local chat ZIP export and local conversation clearing.
 - Encrypted file offer, accept, reject, cancel, transfer, and download flow.
 - File integrity verification with SHA-256.
 - Local trusted-peer memory after a fingerprint is verified.
@@ -96,6 +97,8 @@ File transfer flow:
 5. Receiver downloads the completed file after hash verification passes.
 
 The current file size limit is 100 MB.
+
+Use `Download Chat ZIP` to export the local session transcript, transfer metadata, and completed sent/received file contents that are still retained in memory. Use `Clear Conversation` to remove local messages, file cards, incomplete transfer state, completed file download URLs, and in-memory export attachments without affecting the peer's browser.
 
 ## Security Model
 
@@ -186,6 +189,8 @@ The file offer includes:
 - SHA-256 hash.
 
 The receiver reconstructs the file and verifies the SHA-256 hash before exposing a download link. Potentially active MIME types such as HTML, SVG, JavaScript, and XML are downloaded as `application/octet-stream`.
+
+Completed sent and received file bytes are retained only in memory for local ZIP export. They are cleared on disconnect, identity reset, page reload, cancellation/rejection where applicable, or `Clear Conversation`.
 
 ## Architecture
 
@@ -328,7 +333,7 @@ Current coverage strategy:
 
 - Unit tests cover identity backup/import, session encryption, replay rejection, and file chunk/hash validation.
 - Server tests cover room codes, one-time joins, signaling relay behavior, invalid messages, expiry, disconnects, and rate limits.
-- Playwright tests run two isolated browser contexts through identity creation, short-code pairing, fingerprint verification, encrypted chat, file accept/reject/cancel/download, and manual offer/answer pairing.
+- Playwright tests run two isolated browser contexts through identity creation, short-code pairing, fingerprint verification, encrypted chat, file accept/reject/cancel/download, chat ZIP export, local conversation clearing, and manual offer/answer pairing.
 - Security checks look for unsafe HTML/code execution sinks, missing CSP/Helmet basics, sensitive server logging patterns, and chat/file payloads sent over signaling.
 
 The E2E suite starts its own client and signaling server:
@@ -358,6 +363,7 @@ For a Cloudflare-specific deployment plan, see [Cloudflare Deployment Strategy](
 - Manual mode requires users to safely exchange large JSON offer/answer packages.
 - WebRTC may expose network metadata to peers and ICE infrastructure.
 - File transfer is limited to 100 MB in v1.
+- ZIP export is session-local; exported file bytes are not available after reload or after clearing the conversation.
 - There is no group chat support.
 
 ## Glossary
