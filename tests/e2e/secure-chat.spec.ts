@@ -3,9 +3,15 @@ import { readFile, writeFile } from "node:fs/promises";
 
 const PASSPHRASE = "correct horse battery staple";
 
+interface CapturedSignalFrame {
+  owner: "host" | "joiner";
+  direction: "sent" | "received";
+  payload: string;
+}
+
 test("pairs two clients, verifies fingerprints, chats, and transfers files", async ({ browser }, testInfo) => {
-  const hostContext = await browser.newContext({ acceptDownloads: true });
-  const joinerContext = await browser.newContext({ acceptDownloads: true });
+  const hostContext = await browser.newContext({ acceptDownloads: true, permissions: ["microphone"] });
+  const joinerContext = await browser.newContext({ acceptDownloads: true, permissions: ["microphone"] });
   const host = await hostContext.newPage();
   const joiner = await joinerContext.newPage();
 
@@ -31,16 +37,35 @@ test("pairs two clients, verifies fingerprints, chats, and transfers files", asy
     await expect(joiner.getByTestId("peer-fingerprint")).toContainText(/[A-F0-9]{4}/);
     await expect(host.getByTestId("message-input")).toBeDisabled();
     await expect(joiner.getByTestId("message-input")).toBeDisabled();
+    await expect(host.getByTestId("start-call")).toBeDisabled();
+    await expect(joiner.getByTestId("start-call")).toBeDisabled();
 
     await host.getByTestId("verify-peer").click();
     await joiner.getByTestId("verify-peer").click();
 
     await expect(host.getByTestId("message-input")).toBeEnabled();
     await expect(joiner.getByTestId("message-input")).toBeEnabled();
+    await expect(host.getByTestId("start-call")).toBeEnabled();
+    await expect(joiner.getByTestId("start-call")).toBeEnabled();
 
     await host.getByTestId("message-input").fill("hello from host");
     await host.getByTestId("send-message").click();
     await expect(joiner.getByTestId("message-received").filter({ hasText: "hello from host" })).toBeVisible();
+
+    await host.getByTestId("start-call").click();
+    await expect(joiner.getByTestId("call-status")).toContainText("Incoming audio call");
+    await joiner.getByTestId("accept-call").click();
+    await expect(host.getByTestId("call-status")).toContainText("Call active");
+    await expect(joiner.getByTestId("call-status")).toContainText("Call active");
+    await host.getByTestId("mute-call").click();
+    await expect(joiner.getByTestId("remote-muted")).toBeVisible();
+    await host.getByTestId("end-call").click();
+    await expect(host.getByTestId("start-call")).toBeEnabled();
+    await expect(joiner.getByTestId("start-call")).toBeEnabled();
+
+    await joiner.getByTestId("message-input").fill("chat after call");
+    await joiner.getByTestId("send-message").click();
+    await expect(host.getByTestId("message-received").filter({ hasText: "chat after call" })).toBeVisible();
 
     const rejectPath = testInfo.outputPath("reject-me.txt");
     await writeFile(rejectPath, "reject me");
@@ -77,9 +102,56 @@ test("pairs two clients, verifies fingerprints, chats, and transfers files", asy
   }
 });
 
-test("pairs two clients with manual offer and answer without short-code signaling", async ({ browser }) => {
+test("does not leak chat payloads over the signaling websocket during message transmit", async ({ browser }) => {
   const hostContext = await browser.newContext();
   const joinerContext = await browser.newContext();
+  const host = await hostContext.newPage();
+  const joiner = await joinerContext.newPage();
+  const signalingFrames: CapturedSignalFrame[] = [];
+
+  captureSignalingFrames(host, "host", signalingFrames);
+  captureSignalingFrames(joiner, "joiner", signalingFrames);
+
+  try {
+    await Promise.all([host.goto("/"), joiner.goto("/")]);
+    await Promise.all([createIdentity(host), createIdentity(joiner)]);
+
+    await host.getByTestId("create-room").click();
+    const code = (await host.getByTestId("room-code").textContent())?.replace(/\D/g, "");
+    expect(code).toMatch(/^\d{10}$/);
+
+    await joiner.getByTestId("join-code-input").fill(code ?? "");
+    await joiner.getByTestId("join-room").click();
+
+    await expect(host.getByTestId("peer-fingerprint")).toContainText(/[A-F0-9]{4}/);
+    await expect(joiner.getByTestId("peer-fingerprint")).toContainText(/[A-F0-9]{4}/);
+    await host.getByTestId("verify-peer").click();
+    await joiner.getByTestId("verify-peer").click();
+    await expect(host.getByTestId("message-input")).toBeEnabled();
+    await expect(joiner.getByTestId("message-input")).toBeEnabled();
+
+    const baselineFrameCount = signalingFrames.length;
+    const hostMessage = `leak-check-host-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const joinerMessage = `leak-check-joiner-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    await host.getByTestId("message-input").fill(hostMessage);
+    await host.getByTestId("send-message").click();
+    await expect(joiner.getByTestId("message-received").filter({ hasText: hostMessage })).toBeVisible();
+
+    await joiner.getByTestId("message-input").fill(joinerMessage);
+    await joiner.getByTestId("send-message").click();
+    await expect(host.getByTestId("message-received").filter({ hasText: joinerMessage })).toBeVisible();
+
+    assertNoChatLeakInSignaling(signalingFrames.slice(baselineFrameCount), [hostMessage, joinerMessage]);
+  } finally {
+    await hostContext.close();
+    await joinerContext.close();
+  }
+});
+
+test("pairs two clients with manual offer and answer without short-code signaling", async ({ browser }) => {
+  const hostContext = await browser.newContext({ permissions: ["microphone"] });
+  const joinerContext = await browser.newContext({ permissions: ["microphone"] });
   const host = await hostContext.newPage();
   const joiner = await joinerContext.newPage();
 
@@ -120,6 +192,15 @@ test("pairs two clients with manual offer and answer without short-code signalin
     await host.getByTestId("verify-peer").click();
     await joiner.getByTestId("verify-peer").click();
 
+    await host.getByTestId("start-call").click();
+    await expect(joiner.getByTestId("call-status")).toContainText("Incoming audio call");
+    await joiner.getByTestId("accept-call").click();
+    await expect(host.getByTestId("call-status")).toContainText("Call active");
+    await expect(joiner.getByTestId("call-status")).toContainText("Call active");
+    await host.getByTestId("end-call").click();
+    await expect(host.getByTestId("start-call")).toBeEnabled();
+    await expect(joiner.getByTestId("start-call")).toBeEnabled();
+
     await host.getByTestId("message-input").fill("manual hello");
     await host.getByTestId("send-message").click();
     await expect(joiner.getByTestId("message-received").filter({ hasText: "manual hello" })).toBeVisible();
@@ -136,6 +217,46 @@ async function createIdentity(page: Page): Promise<void> {
   await page.getByTestId("backup-passphrase").fill(PASSPHRASE);
   await page.getByTestId("create-identity").click();
   await expect(page.getByTestId("own-fingerprint")).toContainText(/[A-F0-9]{4}/, { timeout: 60_000 });
+}
+
+function captureSignalingFrames(page: Page, owner: CapturedSignalFrame["owner"], frames: CapturedSignalFrame[]): void {
+  page.on("websocket", (socket) => {
+    if (new URL(socket.url()).pathname !== "/signal") {
+      return;
+    }
+
+    socket.on("framesent", (frame) => {
+      frames.push({ owner, direction: "sent", payload: frame.payload.toString() });
+    });
+    socket.on("framereceived", (frame) => {
+      frames.push({ owner, direction: "received", payload: frame.payload.toString() });
+    });
+  });
+}
+
+function assertNoChatLeakInSignaling(frames: CapturedSignalFrame[], messages: string[]): void {
+  for (const message of messages) {
+    expect(frames, `signaling frames must not contain chat text: ${message}`).not.toContainEqual(
+      expect.objectContaining({
+        payload: expect.stringContaining(message)
+      })
+    );
+  }
+
+  const nonIceSignals = frames.filter((frame) => {
+    const parsed = parseSignalFrame(frame.payload);
+    return !parsed || parsed.type !== "ice_candidate";
+  });
+  expect(nonIceSignals, "post-verification signaling should not carry chat/data frames").toEqual([]);
+}
+
+function parseSignalFrame(payload: string): { type?: unknown } | null {
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    return typeof parsed === "object" && parsed !== null ? (parsed as { type?: unknown }) : null;
+  } catch {
+    return null;
+  }
 }
 
 function isShortCodeSignal(value: unknown): boolean {

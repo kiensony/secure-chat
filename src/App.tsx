@@ -6,12 +6,26 @@ import {
   KeyRound,
   Link2,
   Lock,
+  Mic,
+  MicOff,
+  Phone,
+  PhoneCall,
+  PhoneOff,
+  Play,
   Send,
   ShieldCheck,
   Upload,
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  CALL_INVITE_TIMEOUT_MS,
+  isCallFrameKind,
+  validateCallControlFrame,
+  type CallControlFrame,
+  type CallEndReason,
+  type CallRejectReason
+} from "./callFrames";
 import { formatFingerprint } from "./crypto/encoding";
 import {
   DEFAULT_ENCRYPTION_PROFILE,
@@ -45,6 +59,7 @@ import { isTrustedPeer, rememberTrustedPeer } from "./trustStore";
 type AppPhase = "loading" | "identity" | "ready";
 type PeerRole = "host" | "joiner";
 type PairingMode = "server" | "manual";
+type CallState = "idle" | "outgoing" | "incoming" | "connecting" | "active";
 
 interface ChatMessage {
   id: string;
@@ -92,17 +107,28 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [incomingFiles, setIncomingFiles] = useState<IncomingOfferView[]>([]);
   const [outgoingFiles, setOutgoingFiles] = useState<OutgoingFileView[]>([]);
+  const [callState, setCallState] = useState<CallState>("idle");
+  const [callStatus, setCallStatus] = useState("Calls are available after peer verification.");
+  const [localMuted, setLocalMuted] = useState(false);
+  const [remoteMuted, setRemoteMuted] = useState(false);
+  const [remoteAudioStream, setRemoteAudioStream] = useState<MediaStream | null>(null);
+  const [remoteAudioBlocked, setRemoteAudioBlocked] = useState(false);
 
   const signalingRef = useRef<SignalingClient | null>(null);
   const peerRef = useRef<SecurePeerConnection | null>(null);
   const roleRef = useRef<PeerRole | null>(null);
   const identityRef = useRef<Identity | null>(null);
   const verifiedRef = useRef(false);
+  const callStateRef = useRef<CallState>("idle");
+  const localMutedRef = useRef(false);
+  const callTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const pendingOpenActionRef = useRef<(() => void) | null>(null);
   const pendingOutgoingFilesRef = useRef(new Map<string, { offer: FileOfferPayload; bytes: Uint8Array }>());
   const incomingTransfersRef = useRef(new Map<string, IncomingFileState>());
 
   const canChat = Boolean(identity && peerFingerprint && verified && peerRef.current);
+  const canStartCall = canChat && callState === "idle";
   const formattedOwnFingerprint = useMemo(
     () => (identity ? formatFingerprint(identity.fingerprint) : ""),
     [identity]
@@ -137,14 +163,102 @@ export default function App() {
 
   useEffect(() => {
     verifiedRef.current = verified;
+    if (!verified) {
+      setCallStatus("Calls are available after peer verification.");
+    }
   }, [verified]);
 
   useEffect(() => {
+    const audio = remoteAudioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    audio.srcObject = remoteAudioStream;
+    setRemoteAudioBlocked(false);
+
+    if (callState !== "active" || !remoteAudioStream) {
+      audio.pause();
+      return;
+    }
+
+    const playAttempt = audio.play();
+    if (playAttempt) {
+      void playAttempt.catch(() => {
+        setRemoteAudioBlocked(true);
+        setCallStatus("Browser blocked remote audio playback. Press play to hear the call.");
+      });
+    }
+  }, [callState, remoteAudioStream]);
+
+  useEffect(() => {
     return () => {
+      clearCallTimeout();
       signalingRef.current?.close();
       peerRef.current?.close();
     };
   }, []);
+
+  function setCallStateValue(nextState: CallState): void {
+    callStateRef.current = nextState;
+    setCallState(nextState);
+  }
+
+  function setLocalMutedValue(muted: boolean): void {
+    localMutedRef.current = muted;
+    peerRef.current?.setMicrophoneMuted(muted);
+    setLocalMuted(muted);
+  }
+
+  function clearCallTimeout(): void {
+    if (callTimeoutRef.current) {
+      clearTimeout(callTimeoutRef.current);
+      callTimeoutRef.current = null;
+    }
+  }
+
+  function startCallTimeout(): void {
+    clearCallTimeout();
+    callTimeoutRef.current = setTimeout(() => {
+      if (callStateRef.current === "outgoing") {
+        void sendCallControl({ kind: "call_end", payload: { reason: "timeout" } }).catch(() => undefined);
+        void cleanupCall("Call timed out.");
+        return;
+      }
+
+      if (callStateRef.current === "incoming") {
+        void sendCallControl({ kind: "call_reject", payload: { reason: "timeout" } }).catch(() => undefined);
+        void cleanupCall("Incoming call timed out.");
+      }
+    }, CALL_INVITE_TIMEOUT_MS);
+  }
+
+  async function cleanupCall(nextStatus: string): Promise<void> {
+    clearCallTimeout();
+    await peerRef.current?.stopMicrophone();
+    setLocalMutedValue(false);
+    setRemoteMuted(false);
+    setRemoteAudioBlocked(false);
+    setCallStateValue("idle");
+    setCallStatus(nextStatus);
+  }
+
+  async function sendCallControl(frame: CallControlFrame): Promise<void> {
+    if (!peerRef.current || !verifiedRef.current) {
+      return;
+    }
+    await peerRef.current.send(frame);
+  }
+
+  async function playRemoteAudio(): Promise<void> {
+    try {
+      await remoteAudioRef.current?.play();
+      setRemoteAudioBlocked(false);
+      setCallStatus("Call active.");
+    } catch {
+      setCallStatus("Browser blocked remote audio playback. Press play to hear the call.");
+    }
+  }
 
   async function handleCreateIdentity(): Promise<void> {
     try {
@@ -240,6 +354,12 @@ export default function App() {
   }
 
   function disconnect(): void {
+    clearCallTimeout();
+    setCallStateValue("idle");
+    setLocalMutedValue(false);
+    setRemoteMuted(false);
+    setRemoteAudioBlocked(false);
+    setCallStatus("Calls are available after peer verification.");
     peerRef.current?.close();
     peerRef.current = null;
     signalingRef.current?.close();
@@ -521,7 +641,12 @@ export default function App() {
           );
         },
         onFrame: (frame) => {
-          void handleSecureFrame(frame);
+          void handleSecureFrame(frame).catch((error) => {
+            setStatus(toError(error).message);
+          });
+        },
+        onRemoteAudio: (stream) => {
+          setRemoteAudioStream(stream);
         },
         onStatus: (nextStatus) => setStatus(nextStatus),
         onError: (error) => setStatus(error.message)
@@ -530,9 +655,148 @@ export default function App() {
     );
   }
 
+  async function startCall(): Promise<void> {
+    if (!canChat || callStateRef.current !== "idle") {
+      return;
+    }
+
+    try {
+      setRemoteMuted(false);
+      setRemoteAudioBlocked(false);
+      setCallStateValue("outgoing");
+      setCallStatus("Calling peer...");
+      await sendCallControl({ kind: "call_invite", payload: { media: "audio" } });
+      startCallTimeout();
+    } catch {
+      await cleanupCall("Unable to start the call.");
+    }
+  }
+
+  async function acceptCall(): Promise<void> {
+    if (!canChat || callStateRef.current !== "incoming" || !peerRef.current) {
+      return;
+    }
+
+    clearCallTimeout();
+    setCallStateValue("connecting");
+    setCallStatus("Starting microphone...");
+    try {
+      await peerRef.current.startMicrophone();
+      setLocalMutedValue(false);
+      await sendCallControl({ kind: "call_accept", payload: { media: "audio" } });
+      setCallStateValue("active");
+      setCallStatus("Call active.");
+      addSystemMessage("Voice call active.");
+    } catch {
+      await sendCallControl({ kind: "call_reject", payload: { reason: "failed" } }).catch(() => undefined);
+      await cleanupCall("Microphone permission is required to start the call.");
+    }
+  }
+
+  async function rejectCall(reason: CallRejectReason = "declined"): Promise<void> {
+    if (callStateRef.current !== "incoming") {
+      return;
+    }
+
+    await sendCallControl({ kind: "call_reject", payload: { reason } }).catch(() => undefined);
+    await cleanupCall(reason === "timeout" ? "Incoming call timed out." : "Call rejected.");
+  }
+
+  async function endCall(reason: CallEndReason = "ended"): Promise<void> {
+    if (callStateRef.current === "idle") {
+      return;
+    }
+
+    await sendCallControl({ kind: "call_end", payload: { reason } }).catch(() => undefined);
+    await cleanupCall(reason === "timeout" ? "Call timed out." : "Call ended.");
+    addSystemMessage("Voice call ended.");
+  }
+
+  async function toggleMute(): Promise<void> {
+    if (callStateRef.current !== "active") {
+      return;
+    }
+
+    const muted = !localMutedRef.current;
+    setLocalMutedValue(muted);
+    try {
+      await sendCallControl({ kind: "call_mute", payload: { muted } });
+      setCallStatus(muted ? "Microphone muted." : "Call active.");
+    } catch {
+      setCallStatus("Unable to update mute state.");
+    }
+  }
+
+  async function handleCallControlFrame(frame: CallControlFrame): Promise<void> {
+    switch (frame.kind) {
+      case "call_invite":
+        if (callStateRef.current !== "idle") {
+          await sendCallControl({ kind: "call_reject", payload: { reason: "busy" } }).catch(() => undefined);
+          return;
+        }
+        setRemoteMuted(false);
+        setRemoteAudioBlocked(false);
+        setCallStateValue("incoming");
+        setCallStatus("Incoming audio call.");
+        startCallTimeout();
+        addSystemMessage("Incoming voice call.");
+        return;
+      case "call_accept":
+        if (callStateRef.current !== "outgoing" || !peerRef.current) {
+          await sendCallControl({ kind: "call_end", payload: { reason: "failed" } }).catch(() => undefined);
+          return;
+        }
+        clearCallTimeout();
+        setCallStateValue("connecting");
+        setCallStatus("Starting microphone...");
+        try {
+          await peerRef.current.startMicrophone();
+          setLocalMutedValue(false);
+          setCallStateValue("active");
+          setCallStatus("Call active.");
+          addSystemMessage("Voice call active.");
+        } catch {
+          await sendCallControl({ kind: "call_end", payload: { reason: "failed" } }).catch(() => undefined);
+          await cleanupCall("Microphone permission is required to start the call.");
+        }
+        return;
+      case "call_reject":
+        if (callStateRef.current === "outgoing" || callStateRef.current === "incoming" || callStateRef.current === "connecting") {
+          await cleanupCall(frame.payload.reason === "busy" ? "Peer is busy." : "Call rejected.");
+        }
+        return;
+      case "call_end":
+        if (callStateRef.current !== "idle") {
+          await cleanupCall(frame.payload.reason === "timeout" ? "Call timed out." : "Call ended by peer.");
+          addSystemMessage("Voice call ended.");
+        }
+        return;
+      case "call_mute":
+        if (callStateRef.current === "active" || callStateRef.current === "connecting") {
+          setRemoteMuted(frame.payload.muted);
+          setCallStatus(frame.payload.muted ? "Peer muted microphone." : "Call active.");
+        }
+        return;
+    }
+  }
+
   async function handleSecureFrame(frame: { kind: string; payload: unknown }): Promise<void> {
     if (!verifiedRef.current) {
       setStatus("Received encrypted data before peer verification");
+      return;
+    }
+
+    if (isCallFrameKind(frame.kind)) {
+      let callFrame: CallControlFrame;
+      try {
+        callFrame = validateCallControlFrame(frame.kind, frame.payload);
+      } catch (error) {
+        if (frame.kind === "call_invite") {
+          await sendCallControl({ kind: "call_reject", payload: { reason: "failed" } }).catch(() => undefined);
+        }
+        throw error;
+      }
+      await handleCallControlFrame(callFrame);
       return;
     }
 
@@ -958,6 +1222,72 @@ export default function App() {
             </button>
           </section>
         ) : null}
+
+        <section className="call-band">
+          <PhoneCall size={22} />
+          <div className="call-meta">
+            <strong>Voice call</strong>
+            <p data-testid="call-status">{verified ? callStatus : "Verify peer fingerprint before starting a call."}</p>
+            {remoteMuted ? <span data-testid="remote-muted">Peer muted</span> : null}
+          </div>
+          <div className="call-actions">
+            {callState === "idle" ? (
+              <button type="button" data-testid="start-call" onClick={() => void startCall()} disabled={!canStartCall}>
+                <Phone size={18} />
+                Start Call
+              </button>
+            ) : null}
+            {callState === "incoming" ? (
+              <>
+                <button type="button" data-testid="accept-call" onClick={() => void acceptCall()} disabled={!canChat}>
+                  <Phone size={18} />
+                  Accept
+                </button>
+                <button
+                  type="button"
+                  data-testid="reject-call"
+                  className="secondary"
+                  onClick={() => void rejectCall()}
+                  disabled={!canChat}
+                >
+                  <PhoneOff size={18} />
+                  Reject
+                </button>
+              </>
+            ) : null}
+            {callState === "active" ? (
+              <button type="button" data-testid="mute-call" className="secondary" onClick={() => void toggleMute()}>
+                {localMuted ? <Mic size={18} /> : <MicOff size={18} />}
+                {localMuted ? "Unmute" : "Mute"}
+              </button>
+            ) : null}
+            {callState === "outgoing" || callState === "connecting" || callState === "active" ? (
+              <button type="button" data-testid="end-call" className="secondary" onClick={() => void endCall()}>
+                <PhoneOff size={18} />
+                End
+              </button>
+            ) : null}
+            {remoteAudioBlocked ? (
+              <button
+                type="button"
+                data-testid="play-remote-audio"
+                className="secondary"
+                onClick={() => void playRemoteAudio()}
+              >
+                <Play size={18} />
+                Play
+              </button>
+            ) : null}
+          </div>
+          <audio
+            ref={remoteAudioRef}
+            data-testid="remote-audio"
+            className="remote-audio"
+            autoPlay
+            playsInline
+            controls={remoteAudioBlocked}
+          />
+        </section>
 
         <section className="message-log" aria-live="polite">
           {messages.map((message) => (

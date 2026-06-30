@@ -36,6 +36,37 @@ describe("secure session", () => {
     }
   }, 60_000);
 
+  it("round-trips encrypted call controls and keeps replay protection", async () => {
+    const { aliceSession, bobSession } = await createPairedSessions("standard");
+
+    const invite = await aliceSession.encrypt({
+      kind: "call_invite",
+      payload: {
+        media: "audio"
+      }
+    });
+    await expect(bobSession.decrypt(invite)).resolves.toEqual({
+      kind: "call_invite",
+      payload: {
+        media: "audio"
+      }
+    });
+    await expect(bobSession.decrypt(invite)).rejects.toThrow(/Replay/);
+
+    const accept = await bobSession.encrypt({
+      kind: "call_accept",
+      payload: {
+        media: "audio"
+      }
+    });
+    await expect(aliceSession.decrypt(accept)).resolves.toEqual({
+      kind: "call_accept",
+      payload: {
+        media: "audio"
+      }
+    });
+  }, 60_000);
+
   it("rejects tampered handshake signatures and encrypted frames", async () => {
     const alice = await createIdentity("correct horse battery staple");
     const bob = await createIdentity("another correct horse battery staple");

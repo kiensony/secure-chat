@@ -281,7 +281,7 @@ p {
 .chat-surface {
   display: grid;
   min-width: 0;
-  grid-template-rows: auto auto 1fr auto auto;
+  grid-template-rows: auto auto auto 1fr auto auto;
   min-height: 100vh;
 }
 
@@ -315,6 +315,49 @@ p {
   color: #cce8d9;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
+}
+
+.call-band {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border-bottom: 1px solid #24323a;
+  background: #161f25;
+  padding: 12px 18px;
+}
+
+.call-meta {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.call-meta p,
+.call-meta span {
+  color: #a8b5bd;
+  font-size: 13px;
+}
+
+.call-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.remote-audio {
+  grid-column: 2 / 4;
+  width: min(360px, 100%);
+  height: 32px;
+  justify-self: end;
+}
+
+.remote-audio:not([controls]) {
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .message-log {
@@ -434,11 +477,25 @@ p {
   }
 
   .verify-band,
+  .call-band,
   .chat-header,
   .composer {
     align-items: stretch;
     grid-template-columns: 1fr;
     flex-direction: column;
+  }
+
+  .call-actions {
+    justify-content: stretch;
+  }
+
+  .call-actions > * {
+    flex: 1 1 140px;
+  }
+
+  .remote-audio {
+    grid-column: 1;
+    justify-self: stretch;
   }
 
   .message,

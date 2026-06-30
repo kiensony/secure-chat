@@ -16,6 +16,7 @@ import {
   verifyBytes,
   type Identity
 } from "./identity";
+import type { CallFrameKind } from "../callFrames";
 
 export type PeerRole = "host" | "joiner";
 export type EncryptionProfileId = "standard" | "high_assurance";
@@ -79,7 +80,15 @@ export interface EncryptedEnvelope {
 }
 
 export interface PlainFrame {
-  kind: "chat" | "file_offer" | "file_accept" | "file_reject" | "file_chunk" | "file_complete" | "file_cancel";
+  kind:
+    | "chat"
+    | "file_offer"
+    | "file_accept"
+    | "file_reject"
+    | "file_chunk"
+    | "file_complete"
+    | "file_cancel"
+    | CallFrameKind;
   payload: unknown;
 }
 

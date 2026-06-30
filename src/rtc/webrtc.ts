@@ -8,6 +8,7 @@ const ICE_GATHERING_TIMEOUT_MS = 5000;
 export interface PeerConnectionEvents {
   onSecureReady(peerFingerprint: string): void;
   onFrame(frame: PlainFrame): void;
+  onRemoteAudio(stream: MediaStream): void;
   onStatus(status: string): void;
   onError(error: Error): void;
 }
@@ -28,8 +29,11 @@ export interface ManualSessionPackage {
 
 export class SecurePeerConnection {
   private readonly pc: RTCPeerConnection;
+  private readonly audioTransceiver: RTCRtpTransceiver;
+  private readonly remoteAudioStream = new MediaStream();
   private secureChannel?: SecureChannel;
   private dataChannel?: RTCDataChannel;
+  private localAudioStream?: MediaStream;
   private readonly iceCandidates: RTCIceCandidateInit[] = [];
   private iceGatheringComplete?: Promise<void>;
   private resolveIceGathering?: () => void;
@@ -60,6 +64,18 @@ export class SecurePeerConnection {
     this.pc.addEventListener("datachannel", (event) => {
       this.attachDataChannel(event.channel);
     });
+    this.pc.addEventListener("track", (event) => {
+      if (event.track.kind !== "audio") {
+        return;
+      }
+
+      if (!this.remoteAudioStream.getTracks().includes(event.track)) {
+        this.remoteAudioStream.addTrack(event.track);
+      }
+      this.events.onRemoteAudio(this.remoteAudioStream);
+    });
+
+    this.audioTransceiver = this.pc.addTransceiver("audio", { direction: "sendrecv" });
 
     if (role === "host") {
       this.attachDataChannel(this.pc.createDataChannel("secure-chat", { ordered: true }));
@@ -157,9 +173,57 @@ export class SecurePeerConnection {
     await this.secureChannel.send(frame);
   }
 
+  async startMicrophone(): Promise<void> {
+    if (this.localAudioStream?.getAudioTracks().some((track) => track.readyState === "live")) {
+      return;
+    }
+
+    let stream: MediaStream | undefined;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true
+        },
+        video: false
+      });
+      const [track] = stream.getAudioTracks();
+      if (!track) {
+        throw new Error("Microphone unavailable");
+      }
+      await this.audioTransceiver.sender.replaceTrack(track);
+      this.localAudioStream = stream;
+    } catch {
+      stream?.getTracks().forEach((track) => track.stop());
+      throw new Error("Microphone permission is required to start the call.");
+    }
+  }
+
+  async stopMicrophone(): Promise<void> {
+    const stream = this.localAudioStream;
+    this.localAudioStream = undefined;
+    stream?.getTracks().forEach((track) => track.stop());
+    try {
+      await this.audioTransceiver.sender.replaceTrack(null);
+    } catch {
+      // The peer connection may already be closing.
+    }
+  }
+
+  setMicrophoneMuted(muted: boolean): void {
+    for (const track of this.localAudioStream?.getAudioTracks() ?? []) {
+      track.enabled = !muted;
+    }
+  }
+
+  getRemoteAudioStream(): MediaStream {
+    return this.remoteAudioStream;
+  }
+
   close(): void {
     void this.secureChannel?.close();
     this.dataChannel?.close();
+    void this.stopMicrophone();
     this.pc.close();
   }
 

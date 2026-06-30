@@ -69,6 +69,10 @@ export function createSignalingServer(options: SignalingServerOptions = {}): Sig
   const app = express();
 
   app.disable("x-powered-by");
+  app.use((_req, res, next) => {
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(self)");
+    next();
+  });
   app.use(
     helmet({
       contentSecurityPolicy: false

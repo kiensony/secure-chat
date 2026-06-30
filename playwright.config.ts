@@ -21,7 +21,16 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] }
+      use: {
+        ...devices["Desktop Chrome"],
+        launchOptions: {
+          args: [
+            "--use-fake-device-for-media-stream",
+            "--use-fake-ui-for-media-stream",
+            "--autoplay-policy=no-user-gesture-required"
+          ]
+        }
+      }
     }
   ],
   outputDir: "output/playwright"

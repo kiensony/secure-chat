@@ -38,7 +38,7 @@ const UINT64_LIMIT = 1n << 64n;
 const UINT64_REJECTION_LIMIT = UINT64_LIMIT - (UINT64_LIMIT % ROOM_CODE_MODULUS);
 
 export default {
-  fetch(request, env) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
@@ -54,7 +54,7 @@ export default {
       return env.SIGNALING_LOBBY.get(durableObjectId).fetch(request);
     }
 
-    return env.ASSETS.fetch(request);
+    return withSecurityHeaders(await env.ASSETS.fetch(request));
   }
 } satisfies ExportedHandler<Env>;
 
@@ -331,7 +331,18 @@ function json(payload: unknown, init?: ResponseInit): Response {
     ...init,
     headers: {
       "content-type": "application/json; charset=utf-8",
+      "permissions-policy": "camera=(), microphone=(self)",
       ...init?.headers
     }
+  });
+}
+
+function withSecurityHeaders(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("permissions-policy", "camera=(), microphone=(self)");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
   });
 }

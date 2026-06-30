@@ -23,6 +23,7 @@ Use it for testing and controlled environments first. Before production use, rev
 - Selectable Standard or High Assurance session encryption profile.
 - Short-lived 10-digit room codes for normal pairing.
 - Manual offer/answer exchange for users who do not want app-server signaling.
+- Audio-only peer-to-peer voice calls after fingerprint verification.
 - Encrypted file offer, accept, reject, cancel, transfer, and download flow.
 - File integrity verification with SHA-256.
 - Local trusted-peer memory after a fingerprint is verified.
@@ -75,9 +76,16 @@ Share only the identity fingerprint with your partner. Do not share:
 
 If the fingerprints do not cross-match, do not click `Verified`. Disconnect and start pairing again.
 
-### 4. Chat And Send Files
+### 4. Chat, Call, And Send Files
 
 After both users verify the peer fingerprint, the message box is enabled.
+
+Voice call flow:
+
+1. Caller clicks `Start Call`.
+2. Receiver clicks `Accept` or `Reject`.
+3. The browser asks for microphone access only when accepting a call or after an outgoing call is accepted.
+4. Either side can mute or end the call.
 
 File transfer flow:
 
@@ -130,6 +138,16 @@ For each chat session:
 
 Replay or out-of-order encrypted frames are rejected.
 
+### Voice Call Media
+
+Call invite, accept, reject, mute, and end controls are sent as encrypted DataChannel frames after peer verification. They are not routed through the signaling server.
+
+Voice media is audio-only in this version. It is protected by WebRTC DTLS-SRTP with peer identity trust established by the signed Secure Chat session handshake and fingerprint verification. Media packets are not wrapped in the app's AES-GCM DataChannel frame encryption; that extra encryption layer applies to chat, files, and call-control frames.
+
+The app requests microphone permission only after explicit user action: accepting an incoming call or receiving acceptance for an outgoing call. It does not request camera access.
+
+Where this repo controls HTTP responses, it sets `Permissions-Policy: camera=(), microphone=(self)`. If the built client is served by another static host, configure the same policy there.
+
 ### Signaling Server Scope
 
 The signaling server is only responsible for:
@@ -151,6 +169,8 @@ The signaling server should not receive:
 Manual pairing avoids the app signaling server by having users exchange WebRTC offer and answer packages themselves.
 
 Manual mode is useful when users do not want their pairing setup routed through the app's short-code server. It does not make WebRTC invisible. Depending on network conditions and ICE configuration, local, public, or relay candidate information can still be exposed to the peer and the STUN/TURN infrastructure used.
+
+TURN behavior is unchanged by voice calls. A configured TURN relay can improve reachability and can reduce direct peer IP exposure, but the TURN operator will see relay metadata and must be treated as part of the deployment infrastructure.
 
 ### File Transfer
 
